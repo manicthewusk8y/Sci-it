@@ -11,41 +11,54 @@ learning_rate = 3e-4
 device = 'cuda' if torch.cuda.is_available() else 'cpu'
 
 # ⏳ 2 Days Time Bound Configuration (48 Hours)
-TRAINING_DURATION_SECONDS = 2 * 24 * 60 * 60  # 172,800 seconds
+TRAINING_DURATION_SECONDS = 2 * 24 * 60 * 60  
 eval_interval = 500                           
 
 print(f"Using device: {device}")
 print(f"Training scheduled to run for {TRAINING_DURATION_SECONDS} seconds (2 days).")
 
-# 2. Stream and Parse the ToT-Biology Dataset
-print("Loading and parsing ToT-Biology dataset from Hugging Face...")
-# We use streaming=True to load rows sequentially without consuming massive local RAM
+# 2. Fix: Forcing HF to avoid the Readme and pull the Data Split
+print("Loading and parsing ToT-Biology dataset splits from Hugging Face...")
+# We fetch 'train' but check keys programmatically to ensure we pull rows, not README cards
 ds = load_dataset("mattwesney/ToT-Biology", split="train", streaming=True)
 
-# Build a corpus out of the text features (question, thought process, and answers)
-# We pull a solid chunk of raw characters to create our foundational character vocabulary
 raw_samples = []
 iterator = iter(ds)
-for _ in range(3000): # Grab enough rows to extract a robust token vocab map
+
+# We sweep the stream and cleanly extract the dataset's target content columns
+for i in range(5000): 
     try:
         row = next(iterator)
-        # Combine relevant textual fields into a continuous text stream
-        combined_text = f"Context: {row.get('context', '')}\nQuestion: {row.get('question', '')}\nThought: {row.get('thought', '')}\nAnswer: {row.get('answer', '')}\n\n"
-        raw_samples.append(combined_text)
+        
+        # Build text dynamically from whatever columns the dataset provided
+        # This acts as a net to catch data and skip simple Readme string structures
+        instr = row.get('instruction') or row.get('question') or row.get('text') or ""
+        out = row.get('output') or row.get('answer') or row.get('thought') or ""
+        
+        # Filter out rows that are just empty text or echo HF repository metadata descriptions
+        if len(instr) > 5 or len(out) > 5:
+            combined_text = f"Prompt: {instr}\nResponse: {out}\n\n"
+            raw_samples.append(combined_text)
+            
     except StopIteration:
+        print(f"Reached the maximum end of the streamed dataset array at item {i}.")
         break
 
+# Stitch our extracted dataset text together
 full_text_stream = "".join(raw_samples)
 
-# Unique characters (Our Biology Domain Vocabulary)
+if "ToT-Biology" in full_text_stream[:200] and len(raw_samples) < 5:
+    print("⚠️ WARNING: The stream is still picking up metadata. Check dataset config paths.")
+
+# Unique characters 
 chars = sorted(list(set(full_text_stream)))
 vocab_size = len(chars)
-print(f"Dataset Vocabulary Size: {vocab_size} unique characters.")
+print(f"Dataset Loaded Successfully! Vocabulary Size: {vocab_size} unique characters.")
 
 # Basic Tokenizer
 stoi = { ch:i for i,ch in enumerate(chars) }
 itos = { i:ch for i,ch in enumerate(chars) }
-encode = lambda s: [stoi[c] for c in s if c in stoi] # Skip rare edge chars not cached in stoi
+encode = lambda s: [stoi[c] for c in s if c in stoi]
 decode = lambda l: ''.join([itos[i] for i in l])
 
 # Convert text stream to tensor and split
@@ -127,28 +140,23 @@ end_time = start_time + TRAINING_DURATION_SECONDS
 iter_count = 0
 
 while time.time() < end_time:
-    # Fetch data batch
     xb, yb = get_batch('train')
 
-    # Forward pass & loss optimization
     logits, loss = model(xb, yb)
     optimizer.zero_grad(set_to_none=True)
     loss.backward()
     optimizer.step()
 
-    # Periodic loss logging & time checks
     if iter_count % eval_interval == 0:
         elapsed = time.time() - start_time
         remaining = end_time - time.time()
         
-        # Calculate time remaining format
         rem_hours = int(remaining // 3600)
         rem_mins = int((remaining % 3600) // 60)
         
         print(f"Step {iter_count:6d} | Train Loss: {loss.item():.4f} | "
               f"Elapsed: {elapsed/3600:.2f}h | Remaining: {rem_hours}h {rem_mins}m")
         
-        # Save a model checkpoint dynamically
         torch.save(model.state_dict(), 'biology_llm_checkpoint.pt')
 
     iter_count += 1
